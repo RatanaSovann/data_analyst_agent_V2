@@ -18,8 +18,8 @@ def data_view(file_name: str) -> str:
         # Read Excel file
         df = pd.read_excel(file_to_use)
         
-        # Return preview as markdown
-        preview = df.head().to_markdown(index=False)
+        # Return preview 
+        preview = df.head()
         return f"✅ Loaded `{file_name}` successfully.\n\n**Preview:**\n{preview}"
     
     except Exception as e:

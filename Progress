@@ -5,3 +5,10 @@ Key learning:
 - Use absolute path when specifying the file path to retrieve csv or excel file
 - Need better prompting/tool so agent only use pandas
 - Need to think about the AgentState
+
+## 2026-01-02
+- Defined the following agent: planner, schema_answer, codegen, executor, interpreter
+- Build a simple workflow that can answer basic question regarding the data
+- Need to think about memory: persistent variables etc
+- Right now routing logic is simple one flow conversation, need more iterative routing logic
+- Try generating graphs (graphing agent maybe?)
