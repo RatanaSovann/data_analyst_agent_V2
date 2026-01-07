@@ -1,0 +1,12 @@
+{
+  "file_path": "C:\\Users\\sovan\\Desktop\\CSV_analyst_agent\\uploads\\cafe.xlsx",
+  "columns": [
+    {"Column": "Date", "Type": "datetime", "Meaning": "Timestamp of the transaction"},
+    {"Column": "Receipt number", "Type": "string", "Meaning": "Unique identifier for the sale transaction"},
+    {"Column": "Gross sales", "Type": "int64", "Meaning": "Total sales before discounts"},
+    {"Column": "Discounts", "Type": "int64", "Meaning": "Total discounts applied"},
+    {"Column": "Net sales", "Type": "int64", "Meaning": "Net revenue after discounts"},
+    {"Column": "Description", "Type": "string", "Meaning": "Items purchased and order details"}
+  ],
+  "summary": "The dataset represents cafe sales transactions, including timestamps, receipt identifiers, gross revenue, discounts, net revenue, and itemized descriptions of purchased items."
+}
