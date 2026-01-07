@@ -12,3 +12,9 @@ Key learning:
 - Need to think about memory: persistent variables etc
 - Right now routing logic is simple one flow conversation, need more iterative routing logic
 - Try generating graphs (graphing agent maybe?)
+
+## 2026-01-07
+- The system now have a basic streamlit frontend that handles file uploading functionality
+- Need to connect the existing nodes to fronend
+- Need to introduce multiple tabs and figure out how to print debug message in the debug tab properly
+- Key learning: no need to worry about long-term memory for now instead ensure context persist over long single runs.
