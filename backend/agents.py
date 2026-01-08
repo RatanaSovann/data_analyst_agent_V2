@@ -64,34 +64,6 @@ summary_agent = create_agent(
     system_prompt=summary_prompt
 )
 
-'''
-# Test Agent Output
-
-file_path = r"C:\\Users\\sovan\\Desktop\\CSV_analyst_agent\\uploads\\cafe.xlsx"
-
-
-result = summary_agent.invoke({
-    "file_path": file_path,
-    "messages": [
-        HumanMessage(
-            content=f"Summarize this dataset in Streamlit JSON format: {file_path}"
-            )
-        ],
-    })
-output_text = result["messages"][-1].content
-print(output_text)
-
-# Create a new folder to save agent outputs schema if not exists
-output_folder = os.path.join(os.getcwd(), "dataset_summaries")
-if not os.path.exists(output_folder):
-    os.makedirs(output_folder)
-# Extract file name without extension
-file_name = os.path.splitext(os.path.basename(file_path))[0]
-# Save output to a JSON file
-output_file_path = os.path.join(output_folder, f"{file_name}_summary.json")
-with open(output_file_path, "w") as f:
-    f.write(output_text)
-
 
 #-------------------------------
 
@@ -109,17 +81,8 @@ class AgentState(TypedDict):
     code: Optional[str]
     execution_result: Optional[str]
     final_answer: Optional[str]
+    trace: List[dict]
     
-    
-
-with open(output_file_path, "r", encoding="utf-8") as f:
-    schema = json.load(f)
-    
-state = {
-    "messages": [HumanMessage(content="What was the most popular item sold in July 2023?")],
-    "schema": schema
-}
-
 
 # Test planner node
 
@@ -151,11 +114,16 @@ Respond ONLY in JSON:
     # Update state in-place
     state["needs_code"] = decision["needs_code"]
     state["plan"] = decision["plan"]
-
+    
+    # For tracing/debugging
+    state["trace"].append({
+        "node": "planner",
+        "user_msg": state["messages"][-1].content,
+        "needs_code": state.get('needs_code'),
+        "plan": state.get('plan')
+    })
     return state
     
-
-# Test Schema answer node
 
 def schema_answer_node(state: AgentState):
     schema = state["schema"]
@@ -176,6 +144,13 @@ Question:
 
     # Update state
     state["final_answer"] = response.content
+    
+    # For tracing/debugging
+    state["trace"].append({
+        "node": "schema_answer",
+        "user_msg": state["messages"][-1].content,
+        "final_answer": state.get('final_answer')
+    })
     return state
 
 # Code Gen node
@@ -202,7 +177,6 @@ Schema:
 
 Analysis plan:
 {plan}
-
 
 Your task:
 1. Write a short exploratory analysis reasoning ("thinking") before coding.
@@ -231,6 +205,13 @@ Respond in JSON format exactly as follows:
     state["thinking"] = code_response["thinking"]
     # Remove ```python ``` markers before storing
     state["code"] = extract_python(code_response["code"])
+    
+    # For tracing/debugging
+    state["trace"].append({
+        "node": "codegen",
+        "thinking": state.get('thinking'),
+        "code": state.get('code')
+    })
 
     return state
 
@@ -260,6 +241,13 @@ def executor_node(state: dict):
     # Update state
     state["execution_result"] = output.strip()
     state["result"] = result
+    
+    # For tracing/debugging
+    state["trace"].append({
+        "node": "executor",
+        "execution_result": state.get('execution_result'),
+        "result": state.get('result')
+    })
     return state
 
 
@@ -284,6 +272,12 @@ Explain concisely and clearly the result above in context of the question using 
 
     # Update state
     state["final_answer"] = response.content
+    
+    # For tracing/debugging
+    state["trace"].append({
+        "node": "interpreter",
+        "final_answer": state.get('final_answer')
+    })
     return state
     
 
@@ -299,53 +293,30 @@ def route_after_planner(state: AgentState):
 
 # --------------------------------
 
-graph = StateGraph(AgentState)
+def build_graph():
+    graph = StateGraph(AgentState)
 
-graph.add_node("planner", planner_node)
-graph.add_node("schema_answer", schema_answer_node)
-graph.add_node("codegen", codegen_node)
-graph.add_node("executor", executor_node)
-graph.add_node("interpreter", interpreter_node)
+    graph.add_node("planner", planner_node)
+    graph.add_node("schema_answer", schema_answer_node)
+    graph.add_node("codegen", codegen_node)
+    graph.add_node("executor", executor_node)
+    graph.add_node("interpreter", interpreter_node)
 
-graph.set_entry_point("planner")
+    graph.set_entry_point("planner")
 
-graph.add_conditional_edges(
-    "planner",
-    route_after_planner,
-    {
-        "schema_answer": "schema_answer",
-        "codegen": "codegen"
-    }
-)
+    graph.add_conditional_edges(
+        "planner",
+        route_after_planner,
+        {
+            "schema_answer": "schema_answer",
+            "codegen": "codegen"
+        }
+    )
 
-graph.add_edge("schema_answer", END)
-graph.add_edge("codegen", "executor")
-graph.add_edge("executor", "interpreter")
-graph.add_edge("interpreter", END)
+    graph.add_edge("schema_answer", END)
+    graph.add_edge("codegen", "executor")
+    graph.add_edge("executor", "interpreter")
+    graph.add_edge("interpreter", END)
 
-app = graph.compile()
+    return graph.compile()
 
-# Execute the Graph
-
-
-
-with open(output_file_path, "r", encoding="utf-8") as f:
-    schema = json.load(f)
-
-
-state = {
-    "messages": [HumanMessage(content="What is the top 5 most popular items sold in July 2023?")],
-    "schema": schema  # your pre-loaded schema JSON
-}
-
-
-result = app.invoke(state)
-
-
-print(result.get("needs_code"))
-print(result.get("plan"))
-print(result.get("code"))
-print(result.get("execution_result"))
-print(result.get("final_answer"))
-
-'''

@@ -18,3 +18,7 @@ Key learning:
 - Need to connect the existing nodes to fronend
 - Need to introduce multiple tabs and figure out how to print debug message in the debug tab properly
 - Key learning: no need to worry about long-term memory for now instead ensure context persist over long single runs.
+
+## 2026-01-08
+- The system now has multiple tab and hooked to the backend flow with tracing
+- Tracing error, something about AgentState not being called properly 
