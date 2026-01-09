@@ -105,59 +105,94 @@ with tab1:
                     except Exception as e:
                         st.error(f"Error during summarization: {e}")
            
-    # Initialize AgentState        
-    def initial_state(schema: dict):
-        return {
-            "messages": [],
-            "schema": schema,
-            "needs_code": None,
-            "plan": None,
-            "code": None,
-            "execution_result": None,
-            "final_answer": None,
-            "trace": []
-        }   
+
 with tab2:
     st.subheader("Chat with your Data")
-    if "schema_summary" in st.session_state:
-        output_json = st.session_state["schema_summary"]
-    else:
+
+    if "schema_summary" not in st.session_state:
         st.warning("Please upload a CSV in Tab 1 first.")
-        
+        st.stop()
+
+    output_json = st.session_state["schema_summary"]
+
     if "agent_state" not in st.session_state:
-        st.session_state["agent_state"] = initial_state(output_json)
-    
+        st.session_state["agent_state"] = AgentState(schema=output_json)
     if "agent_app" not in st.session_state:
         st.session_state["agent_app"] = build_graph()
-    
-        # Render chat history FIRST
-    for msg in st.session_state.agent_state["messages"]:
-        if isinstance(msg, HumanMessage):
-            with st.chat_message("user"):
-                st.write(msg.content)
-        elif isinstance(msg, AIMessage):
-            with st.chat_message("assistant"):
-                st.write(msg.content)
-    
-    user_input = st.text_input("Enter your question about the dataset:")
-    
+
+    state: AgentState = st.session_state.agent_state
+
+    chat_container = st.container()
+
+    # Render past messages
+    with chat_container:
+        for msg in state.messages:
+            if isinstance(msg, HumanMessage):
+                with st.chat_message("user"):
+                    st.write(msg.content)
+            elif isinstance(msg, AIMessage):
+                with st.chat_message("assistant"):
+                    st.write(msg.content)
+
+    user_input = st.chat_input("Enter your question about the dataset:")
+
     if user_input:
-       # Append to Agent memory
-        st.session_state.agent_state["messages"].append(
-            HumanMessage(content=user_input)
-            )
-        # Invoke the agent
+        # Append human message
+        new_messages = state.messages + [HumanMessage(content=user_input)]
+        state = state.model_copy(update={"messages": new_messages})
+        st.session_state.agent_state = state
+
+        # Display user message
+        with chat_container:
+            with st.chat_message("user"):
+                st.write(user_input)
+
+        # Invoke agent
         with st.spinner("Thinking..."):
-            st.session_state.agent_state = st.session_state.agent_app.invoke(st.session_state.agent_state)
-        
-        st.rerun() 
-        
-    # --- Render the trace panel ---
-    with st.expander("🧩 Agent Trace"):
-        for event in st.session_state.agent_state.get("trace", []):
-            node = event["node"]
-            st.markdown(f"**Node:** {node}")
-            for k, v in event.items():
-                if k != "node":
-                    st.markdown(f"- **{k}:** `{v}`")
-            st.markdown("---")
+            result = st.session_state.agent_app.invoke(state)
+            state = state.model_copy(update=result if isinstance(result, dict) else result)
+            st.session_state.agent_state = state
+
+        # Append AIMessage from final_answer
+        if state.final_answer:
+            ai_message = AIMessage(content=state.final_answer)
+            new_messages = state.messages + [ai_message]
+            state = state.model_copy(update={"messages": new_messages})
+            st.session_state.agent_state = state
+
+            # Display AI response
+            with chat_container:
+                with st.chat_message("assistant"):
+                    st.write(state.final_answer)
+
+
+with tab3:
+    st.subheader("🧰 Debug / Trace Information")
+
+    if "agent_state" not in st.session_state:
+        st.info("No agent state yet. Upload data in Tab 1 and chat in Tab 2 first.")
+        st.stop()
+
+    state: AgentState = st.session_state.agent_state
+
+    if not state.trace:
+        st.info("No trace events yet. Interact with the agent in Tab 2 to see trace here.")
+        st.stop()
+
+    for idx, event in enumerate(state.trace, 1):
+        node = event.get("node", "Unknown")
+        st.markdown(f"### Event {idx}: Node `{node}`")
+
+        for k, v in event.items():
+            if k == "node":
+                continue
+
+            text = str(v)
+
+            # Use Python code block for multi-line text or code/comments
+            if "\n" in text or "#" in text:
+                st.markdown(f"```python\n{text}\n```")
+            else:
+                st.markdown(f"- **{k}:** `{text}`")
+
+        st.markdown("---")

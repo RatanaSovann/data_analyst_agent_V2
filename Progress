@@ -22,3 +22,7 @@ Key learning:
 ## 2026-01-08
 - The system now has multiple tab and hooked to the backend flow with tracing
 - Tracing error, something about AgentState not being called properly 
+
+## 2026-01-09
+- The system now perform the basic structure of the intended app with all three tabs functioning
+- Things to test: multi turn conversations, consistency of response, add higher capability (generate charts and graph)

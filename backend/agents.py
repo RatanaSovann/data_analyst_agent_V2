@@ -2,7 +2,7 @@ import os
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 from langchain.agents import create_agent
-from typing import Annotated, TypedDict, Sequence, Dict
+from typing import Annotated, Any, TypedDict, Sequence, Dict
 from langchain_core.messages import BaseMessage
 import operator
 from backend.tools import data_view
@@ -14,18 +14,34 @@ import sys
 import re
 import pandas as pd
 from langgraph.graph import StateGraph, END
+from pydantic import BaseModel, Field
 
 
-
-os.getcwd
 load_dotenv()
 
 
 llm = ChatOpenAI(
     model="gpt-5-nano",
     temperature=0,
-    api_key=os.getenv("OPENAI_API_KEY")
+    api_key=os.getenv("OPENAI_API_KEY"),
+    streaming=True
 )
+
+
+# Define Agent State
+
+class AgentState(BaseModel):
+    messages: List[BaseMessage] = Field(default_factory=list)
+    schema: dict = Field(default_factory=dict)
+    needs_code: Optional[bool] = None
+    plan: Optional[str] = None
+    thinking: Optional[str] = None
+    code: Optional[str] = None
+    execution_result: Optional[str] = None
+    result_var: Optional[Any] = None
+    final_answer: Optional[str] = None
+    trace: List[dict] = Field(default_factory=list)
+
 
 #-------------------------------
 
@@ -71,24 +87,12 @@ summary_agent = create_agent(
 
 # -------------------------------
 
-# Define Agent State
-
-class AgentState(TypedDict):
-    messages: List[BaseMessage]
-    schema: dict
-    needs_code: Optional[bool]
-    plan: Optional[str]
-    code: Optional[str]
-    execution_result: Optional[str]
-    final_answer: Optional[str]
-    trace: List[dict]
     
-
 # Test planner node
 
 def planner_node(state: AgentState):
-    schema = state["schema"]
-    user_msg = state["messages"][-1].content
+    schema = state.schema
+    user_msg = state.messages[-1].content
 
     prompt = f"""
 You are a senior data analyst.
@@ -101,10 +105,14 @@ User question:
 
 Decide if code is required.
 
-Respond ONLY in JSON:
+Respond ONLY in valid JSON with the keys:
+- needs_code: boolean
+- plan: string (short reasoning or analysis plan)
+
+Example:
 {{
-  "needs_code": true | false,
-  "plan": "short reasoning or analysis plan"
+  "needs_code": true,
+  "plan": "Compute monthly sales averages per region"
 }}
 """
 
@@ -112,22 +120,22 @@ Respond ONLY in JSON:
     decision = json.loads(response.content)
 
     # Update state in-place
-    state["needs_code"] = decision["needs_code"]
-    state["plan"] = decision["plan"]
+    state.needs_code = decision["needs_code"]
+    state.plan = decision["plan"]
     
     # For tracing/debugging
-    state["trace"].append({
+    state.trace.append({
         "node": "planner",
-        "user_msg": state["messages"][-1].content,
-        "needs_code": state.get('needs_code'),
-        "plan": state.get('plan')
+        "user_msg": user_msg,
+        "needs_code": state.needs_code,
+        "plan": state.plan
     })
     return state
-    
+
 
 def schema_answer_node(state: AgentState):
-    schema = state["schema"]
-    user_msg = state["messages"][-1].content
+    schema = state.schema
+    user_msg = state.messages[-1].content
 
     prompt = f"""
 You are a data analyst. 
@@ -143,13 +151,13 @@ Question:
     response = llm.invoke([HumanMessage(content=prompt)])
 
     # Update state
-    state["final_answer"] = response.content
+    state.final_answer = response.content
     
     # For tracing/debugging
-    state["trace"].append({
+    state.trace.append({
         "node": "schema_answer",
-        "user_msg": state["messages"][-1].content,
-        "final_answer": state.get('final_answer')
+        "user_msg": state.messages[-1].content,
+        "final_answer": state.final_answer
     })
     return state
 
@@ -163,8 +171,8 @@ def extract_python(code_str):
     return code_str.strip()
 
 def codegen_node(state: AgentState):
-    user_msg = state["messages"][-1].content
-    plan = state["plan"]
+    user_msg = state.messages[-1].content
+    plan = state.plan
 
     prompt = f"""
 You are a data scientist expert.
@@ -173,7 +181,7 @@ User question:
 {user_msg}
 
 Schema:
-{json.dumps(state["schema"], indent=2)}
+{json.dumps(state.schema, indent=2)}
 
 Analysis plan:
 {plan}
@@ -202,59 +210,57 @@ Respond in JSON format exactly as follows:
     code_response = json.loads(response.content)
     
     # Update state
-    state["thinking"] = code_response["thinking"]
+    state.thinking = code_response["thinking"]
     # Remove ```python ``` markers before storing
-    state["code"] = extract_python(code_response["code"])
+    state.code = extract_python(code_response["code"])
     
     # For tracing/debugging
-    state["trace"].append({
+    state.trace.append({
         "node": "codegen",
-        "thinking": state.get('thinking'),
-        "code": state.get('code')
+        "thinking": state.thinking,
+        "code": state.code
     })
 
     return state
 
 # Test the executor and its output
 
-def executor_node(state: dict):
-    code = state["code"]
+def executor_node(state: AgentState):
+    code = state.code
 
-    # Sandbox with pre-imported modules
-    local_vars = {}
-    global_vars = {"pd": pd, "re": re}
+    # Use a single dict for both globals and locals
+    sandbox = {"pd": pd, "re": re, "unicodedata": __import__("unicodedata"), "Counter": __import__("collections").Counter}
 
-    # Capture print statements
     old_stdout = sys.stdout
     sys.stdout = mystdout = io.StringIO()
 
     try:
-        exec(code, global_vars, local_vars)
+        exec(code, sandbox)  # everything now shares same namespace
+        result_var = sandbox.get("result", None)
         output = mystdout.getvalue()
-        result = local_vars.get("result", None)
     except Exception as e:
         output = str(e)
-        result = None
+        result_var = None
     finally:
         sys.stdout = old_stdout
 
     # Update state
-    state["execution_result"] = output.strip()
-    state["result"] = result
-    
-    # For tracing/debugging
-    state["trace"].append({
+    state.execution_result = output.strip()
+    state.result_var = result_var
+
+    state.trace.append({
         "node": "executor",
-        "execution_result": state.get('execution_result'),
-        "result": state.get('result')
+        "execution_result": state.execution_result,
+        "result_var": repr(result_var),
     })
+
     return state
 
 
 # Test final answer node
 def interpreter_node(state: AgentState):
-    user_msg = state["messages"][-1].content
-    output = state["execution_result"]
+    user_msg = state.messages[-1].content
+    output = state.execution_result
 
     prompt = f"""
 You are a data analyst explaining results to a stakeholder.
@@ -271,12 +277,12 @@ Explain concisely and clearly the result above in context of the question using 
     response = llm.invoke([HumanMessage(content=prompt)])
 
     # Update state
-    state["final_answer"] = response.content
+    state.final_answer = response.content
     
     # For tracing/debugging
-    state["trace"].append({
+    state.trace.append({
         "node": "interpreter",
-        "final_answer": state.get('final_answer')
+        "final_answer": state.final_answer
     })
     return state
     
@@ -284,7 +290,7 @@ Explain concisely and clearly the result above in context of the question using 
 # Routing Logic
 
 def route_after_planner(state: AgentState):
-    return "codegen" if state["needs_code"] else "schema_answer"
+    return "codegen" if state.needs_code else "schema_answer"
 
 
 # --------------------------------
