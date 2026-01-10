@@ -26,3 +26,10 @@ Key learning:
 ## 2026-01-09
 - The system now perform the basic structure of the intended app with all three tabs functioning
 - Things to test: multi turn conversations, consistency of response, add higher capability (generate charts and graph)
+
+## 2026-01-10
+- The system now can create plots and graphs
+- Need to work on specifiying path of the graph
+- Add more packages like seaborn to make graph look nice & multi lingual support
+- Intepreting the graph (more advanced)
+- Storing variable between turns. This enable user to modify graph. Context of agent output is somehow stored and carry forward (more advanced)

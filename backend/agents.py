@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]  # Set ROOT to the project root directory
+sys.path.append(str(ROOT))
+
 import os
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
@@ -10,7 +16,6 @@ from langchain_core.messages import HumanMessage
 from typing import TypedDict, List, Optional
 import json
 import io
-import sys
 import re
 import pandas as pd
 from langgraph.graph import StateGraph, END
@@ -32,16 +37,27 @@ llm = ChatOpenAI(
 
 class AgentState(BaseModel):
     messages: List[BaseMessage] = Field(default_factory=list)
-    schema: dict = Field(default_factory=dict)
-    needs_code: Optional[bool] = None
+    schema: dict = Field(default_factory=dict) # from summary agent contains file_path
+
+    # planner output
+    next: Optional[str] = None   # "codegen" | "plot_codegen" | "schema_answer"
     plan: Optional[str] = None
+
+    # reasoning & tracing
     thinking: Optional[str] = None
+    trace: List[dict] = Field(default_factory=list)
+
+    # normal code path
     code: Optional[str] = None
     execution_result: Optional[str] = None
     result_var: Optional[Any] = None
-    final_answer: Optional[str] = None
-    trace: List[dict] = Field(default_factory=list)
 
+    # plot path
+    plot_code: Optional[str] = None
+    plot_path: Optional[str] = None
+
+    # final answer
+    final_answer: Optional[str] = None
 
 #-------------------------------
 
@@ -95,7 +111,7 @@ def planner_node(state: AgentState):
     user_msg = state.messages[-1].content
 
     prompt = f"""
-You are a senior data analyst.
+You are a senior data analyst and task router inside an automated data analysis system.
 
 Dataset schema:
 {json.dumps(schema, indent=2)}
@@ -103,33 +119,44 @@ Dataset schema:
 User question:
 "{user_msg}"
 
-Decide if code is required.
+Your job is to decide what kind of action the system should take.
+
+You must choose EXACTLY ONE of these actions:
+
+- "schema_answer": if the user is asking about the dataset structure, columns, schema, or what fields mean.
+- "plot_codegen": if the user is asking to visualize, plot, chart, graph, or draw something.
+- "codegen": if the user is asking to compute, analyze, filter, aggregate, transform, or derive results from the data.
+
+Rules:
+- If the user asks for BOTH analysis and plotting, choose "plot_codegen".
+- If the user asks to visualize, choose "plot_codegen".
+- If the user asks about columns or schema, choose "schema_answer".
+- Otherwise, choose "codegen".
 
 Respond ONLY in valid JSON with the keys:
-- needs_code: boolean
-- plan: string (short reasoning or analysis plan)
+- action: one of ["schema_answer", "codegen", "plot_codegen"]
+- plan: a short, concrete description of what should be done
 
 Example:
 {{
-  "needs_code": true,
-  "plan": "Compute monthly sales averages per region"
+  "action": "plot_codegen",
+  "plan": "Plot total sales by month using matplotlib"
 }}
 """
 
     response = llm.invoke([HumanMessage(content=prompt)])
     decision = json.loads(response.content)
 
-    # Update state in-place
-    state.needs_code = decision["needs_code"]
+    state.next = decision["action"]
     state.plan = decision["plan"]
-    
-    # For tracing/debugging
+
     state.trace.append({
         "node": "planner",
         "user_msg": user_msg,
-        "needs_code": state.needs_code,
+        "action": state.next,
         "plan": state.plan
     })
+
     return state
 
 
@@ -191,7 +218,7 @@ Your task:
 2. Then write Python (pandas) code to carry it out.
 
 Constraints:
-- Assume dataframe is already loaded as `df` if needed, or you can load from file_path.
+- Load dataframe from file_path as df.
 - Use clean, readable code.
 - Assign final output to a variable `result`.
 - At the end of the code, always print result to view it.
@@ -256,6 +283,92 @@ def executor_node(state: AgentState):
 
     return state
 
+def plot_codegen_node(state: AgentState):
+    user_msg = state.messages[-1].content
+    plan = state.plan
+
+    prompt = f"""
+You are a data scientist expert.
+
+User question:
+{user_msg}
+
+Schema:
+{json.dumps(state.schema, indent=2)}
+
+Plotting plan:
+{plan}
+
+Your task:
+1. Write a short explanation ("thinking") of what you will plot and why.
+2. Then write Python code using matplotlib to generate the plot.
+
+Constraints:
+- Assume dataframe is already loaded as `df` if needed, or you can load from file_path..
+- Use matplotlib ONLY (no seaborn, no plotly).
+- Choose an appropriate chart type automatically (line, bar, scatter, histogram, box, etc).
+- The figure must be saved to a file called "output.png".
+- Do NOT call plt.show().
+- Always call plt.tight_layout().
+- Always call plt.savefig("output.png").
+- Always call plt.close().
+- The code should not print anything.
+
+Respond in JSON format exactly as follows:
+
+{{
+  "thinking": "Describe what you will plot and why.",
+  "code": "```python\\n# Python code here\\n```"
+}}
+"""
+
+    response = llm.invoke([HumanMessage(content=prompt)])
+
+    code_response = json.loads(response.content)
+
+    # Update state
+    state.thinking = code_response["thinking"]
+    state.plot_code = extract_python(code_response["code"])
+
+    # For tracing/debugging
+    state.trace.append({
+        "node": "plot_codegen",
+        "thinking": state.thinking,
+        "code": state.plot_code
+    })
+
+    return state
+
+def plot_executor_node(state: AgentState):
+    import matplotlib as plt
+    import pandas as pd
+
+    # Prepare execution context
+    exec_globals = {
+        "__builtins__": __builtins__,
+        "plt": plt,
+        "pd": pd,
+    }
+
+    exec_locals = {}
+
+    # If your dataframe is stored somewhere, expose it:
+    # Example:
+    # exec_globals["df"] = state.result_var or state.df
+
+    # Run generated plot code
+    exec(state.plot_code, exec_globals, exec_locals)
+
+    # Plot file is always enforced by plot_codegen
+    state.plot_path = "output.png"
+    state.final_answer = f"Here’s the chart."
+
+    state.trace.append({
+        "node": "plot_executor",
+        "plot_path": state.plot_path
+    })
+
+    return state
 
 # Test final answer node
 def interpreter_node(state: AgentState):
@@ -290,7 +403,9 @@ Explain concisely and clearly the result above in context of the question using 
 # Routing Logic
 
 def route_after_planner(state: AgentState):
-    return "codegen" if state.needs_code else "schema_answer"
+    if state.next not in {"codegen", "plot_codegen", "schema_answer"}:
+        return "codegen"  # safe default
+    return state.next
 
 
 # --------------------------------
@@ -304,9 +419,15 @@ def build_graph():
 
     graph.add_node("planner", planner_node)
     graph.add_node("schema_answer", schema_answer_node)
+
+    # normal analysis path
     graph.add_node("codegen", codegen_node)
     graph.add_node("executor", executor_node)
     graph.add_node("interpreter", interpreter_node)
+
+    # plot path
+    graph.add_node("plot_codegen", plot_codegen_node)
+    graph.add_node("plot_executor", plot_executor_node)
 
     graph.set_entry_point("planner")
 
@@ -315,14 +436,23 @@ def build_graph():
         route_after_planner,
         {
             "schema_answer": "schema_answer",
-            "codegen": "codegen"
+            "codegen": "codegen",
+            "plot_codegen": "plot_codegen",
         }
     )
 
+    # schema path
     graph.add_edge("schema_answer", END)
+
+    # normal code path
     graph.add_edge("codegen", "executor")
     graph.add_edge("executor", "interpreter")
     graph.add_edge("interpreter", END)
 
+    # plot path
+    graph.add_edge("plot_codegen", "plot_executor")
+    graph.add_edge("plot_executor", END)
+
     return graph.compile()
+
 

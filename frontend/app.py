@@ -133,6 +133,11 @@ with tab2:
             elif isinstance(msg, AIMessage):
                 with st.chat_message("assistant"):
                     st.write(msg.content)
+                    
+                # if message has a plot, display it
+                    plot_path = (msg.additional_kwargs or {}).get("plot_path")
+                    if plot_path:
+                        st.image(plot_path)
 
     user_input = st.chat_input("Enter your question about the dataset:")
 
@@ -155,15 +160,24 @@ with tab2:
 
         # Append AIMessage from final_answer
         if state.final_answer:
-            ai_message = AIMessage(content=state.final_answer)
+            ai_kwargs = {}
+
+            # NEW: attach plot info (only if generated)
+            if state.plot_path:
+                ai_kwargs["plot_path"] = state.plot_path
+
+            ai_message = AIMessage(content=state.final_answer, additional_kwargs=ai_kwargs)
+
             new_messages = state.messages + [ai_message]
             state = state.model_copy(update={"messages": new_messages})
             st.session_state.agent_state = state
 
-            # Display AI response
+            # Display AI response immediately
             with chat_container:
                 with st.chat_message("assistant"):
                     st.write(state.final_answer)
+                    if state.plot_path:
+                        st.image(state.plot_path)
 
 
 with tab3:
