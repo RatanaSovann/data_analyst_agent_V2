@@ -20,8 +20,8 @@ import re
 import pandas as pd
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
-
-
+from backend.utils.fontbank import configure_fontbank
+import matplotlib as mpl
 load_dotenv()
 
 
@@ -54,7 +54,8 @@ class AgentState(BaseModel):
 
     # plot path
     plot_code: Optional[str] = None
-    plot_path: Optional[str] = None
+    plot_paths: List[str] = Field(default_factory=list)
+    plot_turn: int = 0
 
     # final answer
     final_answer: Optional[str] = None
@@ -286,9 +287,12 @@ def executor_node(state: AgentState):
 def plot_codegen_node(state: AgentState):
     user_msg = state.messages[-1].content
     plan = state.plan
-
+    state.plot_turn += 1
+    
+    filename = os.path.join("plots", f"plot_{state.plot_turn:02d}.png")
+    
     prompt = f"""
-You are a data scientist expert.
+You are a data visualization expert.
 
 User question:
 {user_msg}
@@ -301,20 +305,26 @@ Plotting plan:
 
 Your task:
 1. Write a short explanation ("thinking") of what you will plot and why.
-2. Then write Python code using matplotlib to generate the plot.
+2. Then write Python code matplotlib (or seaborn, but must render via matplotlib)to generate plot. Do not use plotly. 
 
 Constraints:
-- Assume dataframe is already loaded as `df` if needed, or you can load from file_path..
-- Use matplotlib ONLY (no seaborn, no plotly).
+- load 'df' from file path.
+- Do NOT include: if __name__ == "__main__":
 - Choose an appropriate chart type automatically (line, bar, scatter, histogram, box, etc).
-- The figure must be saved to a file called "output.png".
+- Do NOT print anything.
 - Do NOT call plt.show().
-- Always call plt.tight_layout().
-- Always call plt.savefig("output.png").
-- Always call plt.close().
-- The code should not print anything.
+- Save to filename exactly: {filename}
 
-Respond in JSON format exactly as follows:
+Saving rules:
+- matplotlib/seaborn:
+    plt.tight_layout()
+    plt.savefig("{filename}")
+    plt.close()
+
+- plotly:
+    fig.write_image("{filename}")
+
+Return JSON only (no markdown, no code fences):
 
 {{
   "thinking": "Describe what you will plot and why.",
@@ -339,33 +349,66 @@ Respond in JSON format exactly as follows:
 
     return state
 
+BANNED = [
+    r'if\s+__name__\s*==\s*[\'"]__main__[\'"]\s*:',
+    r'\bdef\s+main\s*\(',
+    r'\b__name__\b',
+]
+
 def plot_executor_node(state: AgentState):
-    import matplotlib as plt
     import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import plotly.express as px
+    import plotly.graph_objects as go
+    import re
 
-    # Prepare execution context
-    exec_globals = {
-        "__builtins__": __builtins__,
-        "plt": plt,
-        "pd": pd,
-    }
+    # 1) Ensure plots folder exists
+    PLOTS_DIR = "plots"
+    os.makedirs(PLOTS_DIR, exist_ok=True)
 
-    exec_locals = {}
+    # 2) Use the SAME naming logic as plot_codegen_node
+    filename = os.path.join(PLOTS_DIR, f"plot_{state.plot_turn:02d}.png")
 
-    # If your dataframe is stored somewhere, expose it:
-    # Example:
-    # exec_globals["df"] = state.result_var or state.df
+    # 3) Safety check (prevents __main / main)
+    code = (state.plot_code or "").strip()
+    if not code:
+        raise ValueError("plot_code is empty")
 
-    # Run generated plot code
-    exec(state.plot_code, exec_globals, exec_locals)
+    for pat in BANNED:
+        if re.search(pat, code):
+            raise ValueError(f"Rejected plot code (banned pattern): {pat}")
+        
+    old_rc = mpl.rcParams.copy()
+    try:
+        configure_fontbank() # Render different language fonts properly
+        # Inject plotting libs into exec
+        exec_globals = {
+            "__builtins__": __builtins__,
+            "pd": pd,
+            "plt": plt,
+            "sns": sns,
+            "px": px,
+            "go": go,
+            "re": re,
+            "filename": filename,      # optional: lets code do plt.savefig(filename)
+        }
 
-    # Plot file is always enforced by plot_codegen
-    state.plot_path = "output.png"
-    state.final_answer = f"Here’s the chart."
+        # 5) Run the generated plot code
+        exec(code, exec_globals, {})
+    finally:
+        # Restore rcParams to avoid side effects
+        mpl.rcParams.update(old_rc)
+
+    # 6) Save path for frontend
+    state.plot_paths.append(filename)
+
+    state.final_answer = "Here’s the chart."
 
     state.trace.append({
         "node": "plot_executor",
-        "plot_path": state.plot_path
+        "plot_number": state.plot_turn,
+        "plot_path": state.plot_paths,
     })
 
     return state
@@ -454,5 +497,7 @@ def build_graph():
     graph.add_edge("plot_executor", END)
 
     return graph.compile()
+
+
 
 

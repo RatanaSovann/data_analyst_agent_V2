@@ -134,10 +134,10 @@ with tab2:
                 with st.chat_message("assistant"):
                     st.write(msg.content)
                     
-                # if message has a plot, display it
-                    plot_path = (msg.additional_kwargs or {}).get("plot_path")
-                    if plot_path:
-                        st.image(plot_path)
+                # plots attached to this AI message
+                    plot_paths = (msg.additional_kwargs or {}).get("plot_paths", [])
+                    for p in plot_paths:
+                        st.image(p, use_container_width=True)
 
     user_input = st.chat_input("Enter your question about the dataset:")
 
@@ -146,6 +146,9 @@ with tab2:
         new_messages = state.messages + [HumanMessage(content=user_input)]
         state = state.model_copy(update={"messages": new_messages})
         st.session_state.agent_state = state
+        
+        # Snapshot plot count BEFORE invoke (so we can detect new plots)
+        prev_n = len(state.plot_paths)
 
         # Display user message
         with chat_container:
@@ -157,27 +160,31 @@ with tab2:
             result = st.session_state.agent_app.invoke(state)
             state = state.model_copy(update=result if isinstance(result, dict) else result)
             st.session_state.agent_state = state
+            
+        # Detect any new plots generated in this turn    
+        new_plots = state.plot_paths[prev_n:]
 
         # Append AIMessage from final_answer
         if state.final_answer:
             ai_kwargs = {}
 
-            # NEW: attach plot info (only if generated)
-            if state.plot_path:
-                ai_kwargs["plot_path"] = state.plot_path
+            # Attach any new plots to this message
+            if new_plots:
+                ai_kwargs["plot_paths"] = new_plots
 
             ai_message = AIMessage(content=state.final_answer, additional_kwargs=ai_kwargs)
 
             new_messages = state.messages + [ai_message]
             state = state.model_copy(update={"messages": new_messages})
             st.session_state.agent_state = state
-
+            
             # Display AI response immediately
             with chat_container:
                 with st.chat_message("assistant"):
                     st.write(state.final_answer)
-                    if state.plot_path:
-                        st.image(state.plot_path)
+                    for p in new_plots:
+                        st.image(p, width='stretch')
+
 
 
 with tab3:
