@@ -33,3 +33,21 @@ Key learning:
 - Add more packages like seaborn to make graph look nice & multi lingual support
 - Intepreting the graph (more advanced)
 - Storing variable between turns. This enable user to modify graph. Context of agent output is somehow stored and carry forward (more advanced)
+
+## 2026-01-27
+- Revise new structure and introduce SmartHeader, SmartFooter Detection class
+- Need to refactor graph flow and frontend to reflect the new meta data
+
+## 2026-01-28
+- SmartStructure Detection class now available
+- Need to continue refactor Agent prompt to get information properly (perhaps include schema again--col name)
+- Clean up the code
+
+
+## 2026-01-31
+- Code refactored now work in frontend
+- Need to optimized initialization to make it load faster: class, toolcall, low llm latency
+- Improve frontend display
+- Try out different models for coding
+- Improve final response to make it less robotic
+- Organise code structure

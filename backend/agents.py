@@ -1,27 +1,22 @@
-import sys
+import sys, os, io, re, json, operator
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, TypedDict, Annotated
 
-ROOT = Path(__file__).resolve().parents[1]  # Set ROOT to the project root directory
-sys.path.append(str(ROOT))
-
-import os
-from langchain_openai import ChatOpenAI
-from dotenv import load_dotenv
-from langchain.agents import create_agent
-from typing import Annotated, Any, TypedDict, Sequence, Dict
-from langchain_core.messages import BaseMessage
-import operator
-from backend.tools import data_view
-from langchain_core.messages import HumanMessage
-from typing import TypedDict, List, Optional
-import json
-import io
-import re
 import pandas as pd
-from langgraph.graph import StateGraph, END
-from pydantic import BaseModel, Field
-from backend.utils.fontbank import configure_fontbank
 import matplotlib as mpl
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+
+from langchain_openai import ChatOpenAI
+from langchain.agents import create_agent
+from langchain.tools import tool
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langgraph.graph import StateGraph, END
+
+from backend.tools import data_view
+from backend.detectors.structure_detector import SmartStructureDetector
+from backend.utils.fontbank import configure_fontbank
+from backend.utils.helper import _safe_json_loads, load_llm_json
 load_dotenv()
 
 
@@ -37,11 +32,14 @@ llm = ChatOpenAI(
 
 class AgentState(BaseModel):
     messages: List[BaseMessage] = Field(default_factory=list)
+    file_path: Optional[str] = None
     schema: dict = Field(default_factory=dict) # from summary agent contains file_path
+    table_spec: Dict[str, Any] = Field(default_factory=dict)
 
     # planner output
     next: Optional[str] = None   # "codegen" | "plot_codegen" | "schema_answer"
     plan: Optional[str] = None
+    table_handling: Dict[str, Any] = Field(default_factory=dict)
 
     # reasoning & tracing
     thinking: Optional[str] = None
@@ -60,42 +58,267 @@ class AgentState(BaseModel):
     # final answer
     final_answer: Optional[str] = None
 
+
+
+# ============================================================================
+# 
+#   Block 1: Generate table_spec and schema from raw file
+# 
+#   UNIVERSAL DATA SCHEMA ANALYZER
+#
+# ============================================================================
+
+class UniversalDataAnalyzer:
+    """
+    Analyzes a dataset by reading directly from file_path.
+    Uses table_spec (from StructureDetector) to read the table correctly and generate schema.
+    """
+
+    def __init__(
+        self,
+        file_path: str,
+        table_spec: Dict[str, Any],
+        llm: Optional[ChatOpenAI] = None,
+    ):
+        self.file_path = file_path
+        self.table_spec = table_spec or {}
+        self.llm = llm or ChatOpenAI(model="gpt-5-nano", temperature=0)
+
+        self.df: Optional[pd.DataFrame] = None
+        self.columns: List[str] = []
+        self.column_metadata: Dict[str, Any] = {}
+        self.data_type: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Main analysis entry point
+    # ------------------------------------------------------------------
+    def analyze(self) -> Dict[str, Any]:
+        # 1) Read data correctly using table_spec
+        self.df = self._read_dataframe()
+        self.columns = [str(c).strip() for c in self.df.columns]
+
+        # 2) Analyze columns
+        self.column_metadata = self._analyze_columns()
+
+        # 3) Dataset purpose
+        dataset_info = self._understand_dataset()
+
+        # 4) Field semantics
+        field_semantics = self._identify_semantics()
+
+        return {
+            "data_type": self.data_type,
+            "domain": dataset_info.get("domain"),
+            "description": dataset_info.get("description"),
+            "column_metadata": self.column_metadata,
+            "field_semantics": field_semantics
+        }
+
+    # ------------------------------------------------------------------
+    # Reading logic (table_spec is law)
+    # ------------------------------------------------------------------
+    def _read_dataframe(self) -> pd.DataFrame:
+        skip_rows_top = self.table_spec.get("table_region", {}).get("data_start_row_idx", [])
+
+        df = pd.read_csv(self.file_path, skiprows=skip_rows_top)
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+
+    # ------------------------------------------------------------------
+    # Column analysis
+    # ------------------------------------------------------------------
+    def _analyze_columns(self) -> Dict[str, Dict]:
+        metadata: Dict[str, Dict] = {}
+
+        for col in self.columns:
+            col_data = self.df[col]
+
+            metadata[col] = {
+                "dtype": str(col_data.dtype),
+                "content_type": self._infer_content_type(col_data),
+                "null_percentage": float(col_data.isna().sum() / len(col_data) * 100),
+                "unique_count": int(col_data.nunique(dropna=True)),
+                "sample_values": col_data.dropna().head(3).tolist()
+                if not col_data.dropna().empty else [],
+            }
+
+            if metadata[col]["content_type"] in ["numeric", "currency"]:
+                numeric_data = pd.to_numeric(col_data, errors="coerce")
+                metadata[col]["statistics"] = {
+                    "min": float(numeric_data.min()) if pd.notna(numeric_data.min()) else None,
+                    "max": float(numeric_data.max()) if pd.notna(numeric_data.max()) else None,
+                    "mean": float(numeric_data.mean()) if pd.notna(numeric_data.mean()) else None,
+                }
+
+        return metadata
+
+    def _infer_content_type(self, series: pd.Series) -> str:
+        non_null = series.dropna()
+        if non_null.empty:
+            return "empty"
+
+        try:
+            numeric = pd.to_numeric(non_null, errors="coerce")
+            if numeric.notna().sum() / len(non_null) > 0.8:
+                if any(
+                    isinstance(v, str) and any(c in str(v) for c in ["$", "€", "¥", "£"])
+                    for v in non_null.head(10)
+                ):
+                    return "currency"
+                return "numeric"
+        except Exception:
+            pass
+
+        sample = non_null.head(20).astype(str)
+        if any(re.search(r"\d{4}-\d{2}-\d{2}", v) or
+               re.search(r"\d{2}/\d{2}/\d{4}", v)
+               for v in sample):
+            return "date"
+
+        uniq_ratio = non_null.nunique() / len(non_null)
+        if uniq_ratio > 0.95:
+            return "identifier"
+        if non_null.nunique() < 50:
+            return "categorical"
+
+        if non_null.astype(str).str.len().mean() > 50:
+            return "text"
+
+        return "string"
+
+    # ------------------------------------------------------------------
+    # LLM: dataset understanding
+    # ------------------------------------------------------------------
+    def _understand_dataset(self) -> Dict[str, Any]:
+        summary = {
+            "columns": self.columns,
+            "row_count": len(self.df),
+            "column_types": {c: m["content_type"] for c, m in self.column_metadata.items()}
+        }
+
+        system_prompt = SystemMessage(content="""
+Analyze this dataset and determine:
+1. What type of data is this? (financial, customer, sensor, inventory, HR, etc.)
+2. What domain? (finance, retail, healthcare, IoT, etc.)
+3. Brief description of the dataset's purpose
+
+Return JSON:
+{
+  "data_type": "specific type",
+  "domain": "industry domain",
+  "description": "1-2 sentence description"
+}
+""".strip())
+
+        user_prompt = HumanMessage(
+            content="Dataset info:\n" + json.dumps(summary, indent=2, ensure_ascii=False)
+        )
+
+        response = self.llm.invoke([system_prompt, user_prompt])
+        result = _safe_json_loads(response.content)
+
+        self.data_type = result.get("data_type", "unknown")
+        return result or {
+            "data_type": "unknown",
+            "domain": "unknown",
+            "description": "Unknown dataset",
+        }
+
+    # ------------------------------------------------------------------
+    # LLM: field semantics
+    # ------------------------------------------------------------------
+    def _identify_semantics(self) -> Dict[str, Any]:
+        system_prompt = SystemMessage(content="""
+You're analyzing a dataset. Add language in the note section
+REQUIREMENTS:
+- Output MUST be valid JSON only.
+- Output MUST contain a single top-level key: "field_semantics".
+- Each column name MUST appear exactly once inside "field_semantics".
+- Do NOT invent or omit columns.
+
+FIELD SCHEMA:
+{
+  "semantic_role": [string, ...],
+  "business_meaning": string,
+  "recommended_data_type": one of ["integer","float","string","date","datetime","boolean"],
+  "notes": string
+}
+
+Return JSON only in this exact structure:
+{
+  "field_semantics": {
+    "<column_name>": {
+      "semantic_role": [],
+      "business_meaning": "",
+      "recommended_data_type": "string",
+      "notes": ""
+    }
+  }
+}
+""".strip())
+
+        column_info = [
+            {"name": col, "type": meta["content_type"], "samples": meta["sample_values"]}
+            for col, meta in self.column_metadata.items()
+        ]
+
+        user_payload = {
+            "data_type_hint": self.data_type,
+            "columns": column_info
+        }
+
+        user_prompt = HumanMessage(
+            content=json.dumps(user_payload, indent=2, ensure_ascii=False)
+        )
+
+        response = self.llm.invoke([system_prompt, user_prompt])
+        parsed = _safe_json_loads(response.content)
+
+        if "field_semantics" not in parsed:
+            parsed = {"field_semantics": parsed} if parsed else {"field_semantics": {}}
+
+        return parsed
+
+
+# =========================
+# Backend extraction logic for frontend app
+# =========================
+def compute_table_spec_and_schema(file_path: str, llm):
+    detector = SmartStructureDetector(file_path=file_path, llm=llm)
+    table_spec = detector.detect_complete_structure()
+
+    analyzer = UniversalDataAnalyzer(
+        file_path=file_path,
+        table_spec=table_spec,
+        llm=llm,
+    )
+    schema = analyzer.analyze()
+
+    return table_spec, schema
+
 #-------------------------------
 
-# BLOCK 1: Automatically summarize dataset structure and content when user uploads a file
+# NEW Agent: Summarize dataset structure and content understand headers and merged cell, generate table_spec and schema
 
 # -------------------------------
-summary_prompt = """You are a concise dataset summarizer. Use only pandas to read the file.
 
-You will receive a message containing a file path to a dataset. 
+def structure_and_analysis_node(state: AgentState):
+    table_spec, schema = compute_table_spec_and_schema(
+        file_path=state.file_path,
+        llm=llm
+    )
 
-Steps:
-1. Call the `data_view` tool with the exact file path.
-2. From the tool output, extract all column names and their data types.
-3. Create a description for each column.
-4. Output STRICTLY in JSON format with two keys:
-   - 'file_path': the original file path
-   - 'columns': a list of dictionaries with keys 'Column', 'Type', 'Meaning'
-   - 'summary': a short paragraph summarizing the dataset
+    state.table_spec = table_spec
+    state.schema = schema
 
-Example output:
+    state.trace.append({
+        "node": "structure+analysis",
+        "table_region": table_spec.get("table_region"),
+        "data_type": schema.get("data_type"),
+        "domain": schema.get("domain"),
+    })
 
-{
-  "file_path": "uploads/cafe.xlsx",
-  "columns": [
-    {"Column": "Date", "Type": "datetime", "Meaning": "Timestamp of the transaction"},
-    {"Column": "Receipt number", "Type": "string", "Meaning": "Unique identifier for the transaction"}
-  ],
-  "summary": "The dataset represents café sales transactions, including timestamps, receipt numbers, sales, discounts, and items purchased."
-}
-"""
-
-summary_agent = create_agent(
-    model=llm,
-    tools=[data_view],
-    name="SummaryAgent",
-    system_prompt=summary_prompt
-)
+    return state
 
 
 #-------------------------------
@@ -104,58 +327,122 @@ summary_agent = create_agent(
 
 # -------------------------------
 
-    
-# Test planner node
 
 def planner_node(state: AgentState):
     schema = state.schema
+    table_spec = getattr(state, "table_spec", {}) or {}
     user_msg = state.messages[-1].content
+
 
     prompt = f"""
 You are a senior data analyst and task router inside an automated data analysis system.
 
-Dataset schema:
-{json.dumps(schema, indent=2)}
+You will be given:
+1) Dataset schema: domain, column metadata, and field semantics.
+2) Table structure (table_spec): which rows are headers, data, and footers.
+3) A user question that may be written in any language.
+
+Your goals:
+A) Choose the correct action for the next step.
+B) Produce a concrete coding plan that the code generator can follow reliably.
+C) Ensure the plan is SAFE for table artifacts: title rows, multi-row headers, and footer totals.
+D) Be language-aware: match the user's language in your JSON plan fields, and preserve multilingual dataset content.
+
+=====================
+INPUTS
+=====================
+
+Dataset schema (columns/types/summary/semantics):
+{json.dumps(schema, indent=2, ensure_ascii=False)}
+
+Table structure (table_spec):
+{json.dumps(table_spec, indent=2, ensure_ascii=False)}
 
 User question:
 "{user_msg}"
 
-Your job is to decide what kind of action the system should take.
+=====================
+ACTIONS (choose exactly one)
+=====================
+- "schema_answer": user asks about dataset structure/columns/meaning/header/footer/table layout.
+- "plot_codegen": user asks to visualize/plot/chart/graph.
+- "codegen": user asks to compute/analyze/filter/aggregate/transform/derive results.
 
-You must choose EXACTLY ONE of these actions:
+Routing rules:
+- If user asks for BOTH analysis and plotting -> choose "plot_codegen".
+- If user asks to visualize -> "plot_codegen".
+- If user asks about columns/schema/header/footer -> "schema_answer".
+- If user asks for a numeric result (totals, net income value, sum, average) -> choose "codegen".
+- Otherwise -> "codegen".
 
-- "schema_answer": if the user is asking about the dataset structure, columns, schema, or what fields mean.
-- "plot_codegen": if the user is asking to visualize, plot, chart, graph, or draw something.
-- "codegen": if the user is asking to compute, analyze, filter, aggregate, transform, or derive results from the data.
+=====================
+CRITICAL TABLE RULES (MUST FOLLOW)
+=====================
+1) Always respect table_spec.table_region when planning any computation.
+   - header_rows_idx are NOT data and must be excluded from calculations.
+   - footer_rows_idx are NOT data and must be excluded from calculations.
+   - Use data_start_row_idx and data_end_row_idx to slice the true data region.
+   - If footer rows overlap with data_end_row_idx, prioritize footer exclusion.
 
-Rules:
-- If the user asks for BOTH analysis and plotting, choose "plot_codegen".
-- If the user asks to visualize, choose "plot_codegen".
-- If the user asks about columns or schema, choose "schema_answer".
-- Otherwise, choose "codegen".
+2) Your plan MUST explicitly describe the row filtering strategy in code terms.
+   Preferred approach:
+   - df_data = df.iloc[data_start_row_idx : data_end_row_idx]
+   - df_data = df_data.drop(index=footer_rows_idx, errors="ignore")
+   State that this must happen BEFORE any aggregation.
 
-Respond ONLY in valid JSON with the keys:
-- action: one of ["schema_answer", "codegen", "plot_codegen"]
-- plan: a short, concrete description of what should be done
+3) If footer_hints suggests totals or net income (e.g., "Total", "Net Income"):
+   - Your plan SHOULD include an optional validation step:
+     compute totals from df_data and compare against footer values
+     IF footer numeric values are present / parseable.
 
-Example:
+=====================
+DATA TYPE / CLEANING RULES (MUST INCLUDE WHEN NEEDED)
+=====================
+When the question involves money, totals, net income, aggregations, or comparisons:
+- Convert currency strings to numeric:
+  - remove currency symbols, commas, whitespace
+  - handle parentheses as negatives if present (e.g., "(1,234.00)" -> -1234.0)
+- Treat Income and Expense as numeric floats (missing values -> 0).
+- Parse DATE into datetime only if time grouping/filtering is needed.
+- Preserve multilingual text (e.g., Khmer) in Supplier/DESCRIPTION; do not coerce encoding.
+
+=====================
+OUTPUT FORMAT (STRICT)
+=====================
+Respond ONLY in valid JSON with keys:
+- "action": one of ["schema_answer", "codegen", "plot_codegen"]
+- "language": a short language label inferred from the user question (e.g., "en", "km", "ja")
+- "plan": short concrete plan (written in the user's language)
+- "table_handling": object describing how to slice/exclude rows using table_spec
+
+Example output:
 {{
-  "action": "plot_codegen",
-  "plan": "Plot total sales by month using matplotlib"
+  "action": "codegen",
+  "language": "en",
+  "plan": "Slice to data rows using table_spec; drop footer rows; parse Income/Expense to numeric; compute net income (sum income - sum expense) by Dept.; return a sorted table.",
+  "table_handling": {{
+    "data_slice": "df.iloc[data_start_row_idx:data_end_row_idx]",
+    "drop_rows": "footer_rows_idx",
+    "notes": "Exclude header_rows_idx and footer_rows_idx from all aggregations."
+  }}
 }}
-"""
+""".strip()
 
     response = llm.invoke([HumanMessage(content=prompt)])
-    decision = json.loads(response.content)
+
+    # robust-ish parse (optional, but recommended)
+    decision = load_llm_json(response.content)
 
     state.next = decision["action"]
     state.plan = decision["plan"]
+    state.table_handling = decision.get("table_handling", {})
 
     state.trace.append({
         "node": "planner",
         "user_msg": user_msg,
         "action": state.next,
-        "plan": state.plan
+        "plan": state.plan,
+        "used_table_spec": True
     })
 
     return state
@@ -198,32 +485,83 @@ def extract_python(code_str):
         return match.group(1).strip()
     return code_str.strip()
 
+
 def codegen_node(state: AgentState):
     user_msg = state.messages[-1].content
     plan = state.plan
+    schema = state.schema
+    table_spec = getattr(state, "table_spec", {}) or {}
+    table_handling = state.table_handling or {}
 
+    # Small, token-safe context window
+    prev_user_msgs = [
+        m.content for m in state.messages[-5:]
+        if getattr(m, "type", "") in ("human", "user") or m.__class__.__name__ == "HumanMessage"
+    ]
+    prev_context = {
+        "recent_user_messages": prev_user_msgs,
+        "previous_code": state.code,
+        "previous_execution_result": state.execution_result if state.execution_result else None,
+        "previous_final_answer": state.final_answer if state.final_answer else None,
+    }
+    
     prompt = f"""
-You are a data scientist expert.
+You are a senior data scientist writing pandas code inside an automated analysis system.
 
-User question:
-{user_msg}
+=====================
+RECENT CONTEXT
+=====================
+{json.dumps(prev_context, indent=2, ensure_ascii=False)}
 
-Schema:
-{json.dumps(state.schema, indent=2)}
+=====================
+SCHEMA (SEMANTICS)
+=====================
+{json.dumps(schema, indent=2, ensure_ascii=False)}
+
+=====================
+TABLE STRUCTURE (SOURCE OF TRUTH)
+=====================
+table_spec:
+{json.dumps(table_spec, indent=2, ensure_ascii=False)}
+
+table_handling (planner output; must follow):
+{json.dumps(table_handling, indent=2, ensure_ascii=False)}
 
 Analysis plan:
 {plan}
 
-Your task:
-1. Write a short exploratory analysis reasoning ("thinking") before coding.
-2. Then write Python (pandas) code to carry it out.
+=====================
+FOLLOW-UP vs NEW TASK
+=====================
+Decide if this is a FOLLOW-UP or NEW TASK.
+- FOLLOW-UP: tweak filters/grouping/metrics based on prior results.
+- NEW TASK: unrelated.
 
-Constraints:
-- Load dataframe from file_path as df.
-- Use clean, readable code.
-- Assign final output to a variable `result`.
-- At the end of the code, always print result to view it.
-- Return **only valid Python code** in the code section.
+If FOLLOW-UP and previous_code exists: minimally modify previous_code.
+If NEW TASK: write fresh code.
+
+=====================
+HARD CONSTRAINTS (MUST FOLLOW)
+=====================
+1) file_path variable is available. Load df from file_path.
+2) ABSOLUTELY DO NOT auto-detect headers/footers or scan rows to "find header".
+   - You MUST use table_spec.table_region (or table_handling) for row slicing.
+   - Only if table_spec/table_handling is missing or empty may you fallback to detection.
+3) You MUST exclude:
+   - header_rows_idx
+   - footer_rows_idx
+   from all computations.
+4) Always create a clean working dataframe df_data that contains ONLY true data rows.
+5) Money parsing:
+   - Income/Expense may be strings like "$3,306.18"
+   - Convert to numeric floats safely.
+   - Missing values -> 0 for computations.
+6) DATE parsing:
+   - Parse DATE to datetime only if needed (filter/group by date).
+   - Use robust parsing for formats like "1-Jul-25".
+7) Assign the final output to a variable named `result`.
+8) At the end: print(result)
+9) Return ONLY valid Python code (no markdown fences inside the "code" string).
 
 Respond in JSON format exactly as follows:
 
@@ -234,8 +572,10 @@ Respond in JSON format exactly as follows:
 """
 
     response = llm.invoke([HumanMessage(content=prompt)])
-
-    code_response = json.loads(response.content)
+    try:
+        code_response = load_llm_json(response.content)
+    except Exception:
+        code_response = json.loads(response.content)
     
     # Update state
     state.thinking = code_response["thinking"]
@@ -257,7 +597,12 @@ def executor_node(state: AgentState):
     code = state.code
 
     # Use a single dict for both globals and locals
-    sandbox = {"pd": pd, "re": re, "unicodedata": __import__("unicodedata"), "Counter": __import__("collections").Counter}
+    sandbox = {
+               "file_path": state.file_path,
+               "pd": pd, 
+               "re": re, 
+               "unicodedata": __import__("unicodedata"), 
+               "Counter": __import__("collections").Counter}
 
     old_stdout = sys.stdout
     sys.stdout = mystdout = io.StringIO()
@@ -285,66 +630,120 @@ def executor_node(state: AgentState):
     return state
 
 def plot_codegen_node(state: AgentState):
+    import os, json
+    from langchain_core.messages import HumanMessage
+
     user_msg = state.messages[-1].content
     plan = state.plan
-    state.plot_turn += 1
-    
-    filename = os.path.join("plots", f"plot_{state.plot_turn:02d}.png")
-    
-    prompt = f"""
-You are a data visualization expert.
+    schema = getattr(state, "schema", {}) or {}
+    table_spec = getattr(state, "table_spec", {}) or {}
+    table_handling = getattr(state, "table_handling", {}) or {}
 
-User question:
+    state.plot_turn += 1
+    os.makedirs("plots", exist_ok=True)
+    filename = os.path.join("plots", f"plot_{state.plot_turn:02d}.png")
+
+    prompt = f"""
+You are a data visualization expert generating matplotlib code inside an automated analysis system.
+
+=====================
+USER QUESTION
+=====================
 {user_msg}
 
-Schema:
-{json.dumps(state.schema, indent=2)}
+=====================
+SCHEMA (SEMANTICS)
+=====================
+{json.dumps(schema, indent=2, ensure_ascii=False)}
 
-Plotting plan:
+=====================
+TABLE STRUCTURE (SOURCE OF TRUTH)
+=====================
+table_spec:
+{json.dumps(table_spec, indent=2, ensure_ascii=False)}
+
+table_handling (planner output; must follow):
+{json.dumps(table_handling, indent=2, ensure_ascii=False)}
+
+=====================
+PLOTTING PLAN
+=====================
 {plan}
 
-Your task:
-1. Write a short explanation ("thinking") of what you will plot and why.
-2. Then write Python code matplotlib (or seaborn, but must render via matplotlib)to generate plot. Do not use plotly. 
+=====================
+HARD CONSTRAINTS (MUST FOLLOW)
+=====================
+1) file_path variable is available. Load df from file_path.
+2) ABSOLUTELY DO NOT auto-detect headers/footers or scan rows to "find header".
+   - You MUST use table_spec.table_region (or table_handling) for row slicing.
+   - Only if table_spec is missing/empty may you fallback to detection.
+3) You MUST exclude header_rows_idx and footer_rows_idx from plotting/aggregation.
+4) Create df_data that contains ONLY true data rows before any plot aggregation.
+5) Use matplotlib (seaborn optional, but render via matplotlib). DO NOT use plotly.
+6) Do NOT print anything. Do NOT call plt.show().
+7) Save exactly to: {filename}
+   Use:
+     plt.tight_layout()
+     plt.savefig("{filename}")
+     plt.close()
 
-Constraints:
-- load 'df' from file path.
-- Do NOT include: if __name__ == "__main__":
-- Choose an appropriate chart type automatically (line, bar, scatter, histogram, box, etc).
-- Do NOT print anything.
-- Do NOT call plt.show().
-- Save to filename exactly: {filename}
+=====================
+RECOMMENDED DATA PREP PATTERN (USE THIS)
+=====================
+A) Read dataframe:
+   - choose pd.read_csv or pd.read_excel based on file extension.
 
-Saving rules:
-- matplotlib/seaborn:
-    plt.tight_layout()
-    plt.savefig("{filename}")
-    plt.close()
+B) Apply table slicing:
+   region = table_spec.get("table_region", {{}})
+   start = region.get("data_start_row_idx")
+   end = region.get("data_end_row_idx")
+   footer = region.get("footer_rows_idx") or []
+   header = region.get("header_rows_idx") or []
 
-- plotly:
-    fig.write_image("{filename}")
+   df_data = df
+   if start is not None and end is not None:
+       df_data = df.iloc[start:end].copy()
 
+   df_data = df_data.drop(index=[i for i in footer if i in df_data.index], errors="ignore")
+   df_data = df_data.drop(index=[i for i in header if i in df_data.index], errors="ignore")
+
+C) If plotting Income/Expense amounts:
+   - Convert currency strings like "$3,306.18" to floats.
+   - Missing values -> 0.
+
+D) Choose an appropriate chart type automatically based on the question:
+   - Trend over time -> line plot
+   - Compare categories -> bar chart
+   - Distribution -> histogram/box
+   - Relationship between two numeric vars -> scatter
+
+=====================
+OUTPUT JSON (STRICT)
+=====================
 Return JSON only (no markdown, no code fences):
-
 {{
-  "thinking": "Describe what you will plot and why.",
-  "code": "```python\\n# Python code here\\n```"
+  "thinking": "...",
+  "code": "import ...\\n...\\nplt.savefig(\\"{filename}\\")\\nplt.close()"
 }}
-"""
+""".strip()
 
     response = llm.invoke([HumanMessage(content=prompt)])
 
-    code_response = json.loads(response.content)
+    # Use your robust parser if available (recommended)
+    try:
+        code_response = load_llm_json(response.content)
+    except Exception:
+        code_response = json.loads(response.content)
 
-    # Update state
     state.thinking = code_response["thinking"]
-    state.plot_code = extract_python(code_response["code"])
+    state.plot_code = code_response["code"]  # no code fences expected now
 
-    # For tracing/debugging
     state.trace.append({
         "node": "plot_codegen",
         "thinking": state.thinking,
-        "code": state.plot_code
+        "code": state.plot_code,
+        "plot_filename": filename,
+        "used_table_spec": True
     })
 
     return state
@@ -385,6 +784,7 @@ def plot_executor_node(state: AgentState):
         # Inject plotting libs into exec
         exec_globals = {
             "__builtins__": __builtins__,
+            "file_path": state.file_path,
             "pd": pd,
             "plt": plt,
             "sns": sns,
@@ -499,5 +899,4 @@ def build_graph():
     return graph.compile()
 
 
-
-
+graph = build_graph()

@@ -9,4 +9,4 @@
     {"Column": "Description", "Type": "string", "Meaning": "Items sold in the transaction"}
   ],
   "summary": "The dataset captures cafe sales transactions, including timestamps, receipt IDs, gross sales, discounts, net sales, and itemized descriptions of purchased items."
-}
+}}

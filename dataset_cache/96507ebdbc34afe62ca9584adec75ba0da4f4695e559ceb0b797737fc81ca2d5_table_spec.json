@@ -1,0 +1,36 @@
+{
+  "table_region": {
+    "header_rows_idx": [
+      0,
+      1
+    ],
+    "data_start_row_idx": 2,
+    "data_end_row_idx": 40,
+    "footer_rows_idx": [
+      40,
+      41
+    ]
+  },
+  "header_hints": {
+    "header_label_row": [
+      {
+        "row": 0,
+        "start_col": 0,
+        "span": 8,
+        "value": "﻿Expense and Income for Resort"
+      },
+      {
+        "row": 1,
+        "start_col": 0,
+        "span": 8,
+        "value": "Jul-25"
+      }
+    ]
+  },
+  "footer_hints": {
+    "footer_label_row": [
+      "Total amount for GTRR Jul 2025",
+      "Net Income"
+    ]
+  }
+}

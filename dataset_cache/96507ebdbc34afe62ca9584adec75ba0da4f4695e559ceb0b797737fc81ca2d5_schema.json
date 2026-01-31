@@ -1,0 +1,174 @@
+{
+  "data_type": "financial transactions / accounting ledger",
+  "domain": "finance / accounting / procurement",
+  "description": "A 40-row ledger of financial transactions (supplier purchases and related income/expense entries), including date, supplier, department, voucher number, and descriptive text for basic accounting analysis.",
+  "column_metadata": {
+    "No": {
+      "dtype": "object",
+      "content_type": "numeric",
+      "null_percentage": 0.0,
+      "unique_count": 40,
+      "sample_values": [
+        "1",
+        "2",
+        "3"
+      ],
+      "statistics": {
+        "min": 1.0,
+        "max": 38.0,
+        "mean": 19.5
+      }
+    },
+    "DATE": {
+      "dtype": "object",
+      "content_type": "categorical",
+      "null_percentage": 10.0,
+      "unique_count": 15,
+      "sample_values": [
+        "1-Jul-25",
+        "1-Jul-25",
+        "5-Jul-25"
+      ]
+    },
+    "Supplier": {
+      "dtype": "object",
+      "content_type": "categorical",
+      "null_percentage": 20.0,
+      "unique_count": 22,
+      "sample_values": [
+        "សួនផ្កា សុខសារឿន",
+        "សួនផ្កា សុខសារឿន",
+        "Booking.com"
+      ]
+    },
+    "Dept.": {
+      "dtype": "object",
+      "content_type": "categorical",
+      "null_percentage": 20.0,
+      "unique_count": 6,
+      "sample_values": [
+        "HK",
+        "HK",
+        "GTRR"
+      ]
+    },
+    "PV No": {
+      "dtype": "object",
+      "content_type": "categorical",
+      "null_percentage": 20.0,
+      "unique_count": 27,
+      "sample_values": [
+        "GTRR/PV2507-001",
+        "GTRR/PV2507-001",
+        "GTRR/PV2507-002"
+      ]
+    },
+    "DESCRIPTION": {
+      "dtype": "object",
+      "content_type": "identifier",
+      "null_percentage": 10.0,
+      "unique_count": 35,
+      "sample_values": [
+        "បង់ផ្ដាច់ 50% ថ្លៃដាំស្មៅនៅវីឡា (តម្លៃសរុប $630.00)",
+        "ថែមស្មៅម៉ាឡេដាំថែម 11ការ៉េ",
+        "កំរៃជើងសារសម្រាប់ខែ មិថុនា/2025 (Booking.Com Commision for 01-Jun-25 to 30- Jun-25) "
+      ]
+    },
+    "Income": {
+      "dtype": "object",
+      "content_type": "identifier",
+      "null_percentage": 85.0,
+      "unique_count": 6,
+      "sample_values": [
+        "$3,306.18",
+        "$15,727.70",
+        "$7,857.03"
+      ]
+    },
+    "Expense": {
+      "dtype": "object",
+      "content_type": "categorical",
+      "null_percentage": 17.5,
+      "unique_count": 31,
+      "sample_values": [
+        "$315.00",
+        "$11.00",
+        "$1,024.44"
+      ]
+    }
+  },
+  "field_semantics": {
+    "field_semantics": {
+      "No": {
+        "semantic_role": [
+          "sequence_number",
+          "record_identifier"
+        ],
+        "business_meaning": "Row sequence number in the ledger",
+        "recommended_data_type": "integer",
+        "notes": "Numeric sequence; usually starts at 1. Ensure integer parsing; no currency."
+      },
+      "DATE": {
+        "semantic_role": [
+          "transaction_date",
+          "date"
+        ],
+        "business_meaning": "Date of the financial transaction",
+        "recommended_data_type": "date",
+        "notes": "Format appears as d-Mmm-yy (e.g., 1-Jul-25). May require parsing to a standard date type."
+      },
+      "Supplier": {
+        "semantic_role": [
+          "supplier_name"
+        ],
+        "business_meaning": "Name of the supplier or vendor",
+        "recommended_data_type": "string",
+        "notes": "Names may include Khmer script (e.g., Cambodian names); ensure UTF-8 encoding."
+      },
+      "Dept.": {
+        "semantic_role": [
+          "department_code",
+          "organization_unit"
+        ],
+        "business_meaning": "Department code associated with the entry",
+        "recommended_data_type": "string",
+        "notes": "Examples: HK, GTRR. Treat as text; do not infer numeric value."
+      },
+      "PV No": {
+        "semantic_role": [
+          "payment_voucher_number"
+        ],
+        "business_meaning": "Payment voucher identifier",
+        "recommended_data_type": "string",
+        "notes": "Alphanumeric identifier; includes slashes and hyphens. Preserve exact format."
+      },
+      "DESCRIPTION": {
+        "semantic_role": [
+          "description",
+          "narrative"
+        ],
+        "business_meaning": "Narrative description of the transaction",
+        "recommended_data_type": "string",
+        "notes": "Free-form text; may include Khmer script and organizational notes."
+      },
+      "Income": {
+        "semantic_role": [
+          "income_amount",
+          "income_value"
+        ],
+        "business_meaning": "Income amount associated with the transaction",
+        "recommended_data_type": "float",
+        "notes": "Currency amounts shown with a leading $ and thousand separators. Convert to numeric value."
+      },
+      "Expense": {
+        "semantic_role": [
+          "expense_amount",
+          "expense_value"
+        ],
+        "business_meaning": "Expense amount associated with the transaction",
+        "recommended_data_type": "float",
+        "notes": "Currency amounts shown with a leading $ and thousand separators. Convert to numeric value."
+      }
+    }
+  }
+}
