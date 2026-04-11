@@ -77,8 +77,27 @@ The planner agent will analyze the question and generate plans on how to retriev
 <img width="2000" height="1200" alt="debug 2 code gen" src="https://github.com/user-attachments/assets/7f1c3564-4b0f-4ee3-9a0d-e127028561f7" />
 <img width="1500" height="400" alt="dewbug 5 answer" src="https://github.com/user-attachments/assets/8bdebc79-7fa4-4aa2-b8a8-64959d8a7817" />
 
+The agent can also generate graph when requested:
+<img width="1400" height="800" alt="image" src="https://github.com/user-attachments/assets/5b863b90-ba49-48aa-bf02-4faeaeaba21e" />
 
+- In the Debug tab we can see the steps and thinking process the agent took to get there:
+<img width="1500" height="1000" alt="plot code 1" src="https://github.com/user-attachments/assets/3c18a1d1-b09a-4330-b6a5-7fae183e195d" />
+<img width="1500" height="1000" alt="plot code 2" src="https://github.com/user-attachments/assets/034c45d3-59e3-4307-b05a-77b99c80ca80" />
 
+# 🎯 Why This Project Matters
 
+Most data tools require technical skills. This project aims to:
+
+- Lower the barrier to data analysis
+- Enable non-technical users to extract insights
+- Automate repetitive analytical workflows
+- Demonstrate agentic AI systems in real-world use cases
+
+# 🔮 Future Improvements
+- Support Excel / multiple file uploads
+- Add memory persistence across sessions
+- Optimize for speed 
+- Advanced visualizations (Plotly, dashboards)
+- Add ability to generate a full business report based on Data
 
 
